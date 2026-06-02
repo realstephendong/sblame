@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/stephendong/sblame/internal/blame"
-	"github.com/stephendong/sblame/internal/types"
+	"github.com/realstephendong/sblame/internal/blame"
+	"github.com/realstephendong/sblame/internal/types"
 )
 
 func main() {

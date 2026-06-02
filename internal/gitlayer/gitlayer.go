@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/go-git/go-git/v5"
-	"github.com/stephendong/sblame/internal/types"
+	"github.com/realstephendong/sblame/internal/types"
 )
 
 // ErrNotImplemented is returned by stub functions that have no implementation yet.

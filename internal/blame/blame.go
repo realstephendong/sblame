@@ -14,7 +14,7 @@ package blame
 import (
 	"errors"
 
-	"github.com/stephendong/sblame/internal/types"
+	"github.com/realstephendong/sblame/internal/types"
 )
 
 // ErrNotImplemented is returned by stub functions that have no implementation yet.

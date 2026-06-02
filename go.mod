@@ -1,4 +1,4 @@
-module github.com/stephendong/sblame
+module github.com/realstephendong/sblame
 
 go 1.22
 
