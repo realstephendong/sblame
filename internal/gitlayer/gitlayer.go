@@ -46,13 +46,39 @@ type Repo struct {
 	repo *git.Repository
 }
 
-// Open opens a git repository at the given filesystem path.
+// Open opens the git repository containing the given filesystem path. Parent
+// directories are searched (DetectDotGit), so the path may be anywhere inside a
+// working tree, not just its root.
 func Open(path string) (*Repo, error) {
-	r, err := git.PlainOpen(path)
+	r, err := git.PlainOpenWithOptions(path, &git.PlainOpenOptions{DetectDotGit: true})
 	if err != nil {
 		return nil, err
 	}
 	return &Repo{repo: r}, nil
+}
+
+// ResolveCommit resolves a revision string — "HEAD", a branch or tag name, or a
+// full/abbreviated hash — to its commit object.
+func (r *Repo) ResolveCommit(rev string) (*object.Commit, error) {
+	h, err := r.repo.ResolveRevision(plumbing.Revision(rev))
+	if err != nil {
+		return nil, fmt.Errorf("gitlayer: resolving revision %q: %w", rev, err)
+	}
+	commit, err := r.repo.CommitObject(*h)
+	if err != nil {
+		return nil, fmt.Errorf("gitlayer: loading commit %s: %w", h.String(), err)
+	}
+	return commit, nil
+}
+
+// Root returns the absolute path to the repository's working-tree root, used to
+// translate filesystem paths into repository-relative paths.
+func (r *Repo) Root() (string, error) {
+	wt, err := r.repo.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("gitlayer: obtaining worktree: %w", err)
+	}
+	return wt.Filesystem.Root(), nil
 }
 
 // CommitByHash resolves a hex commit hash to its commit object.

@@ -194,6 +194,16 @@ func (r *Repo) DiffFile(child, parent *object.Commit, path string) (*FileDiff, e
 	}, nil
 }
 
+// Diff computes the line-level hunks describing the parent -> child
+// transformation of two already-loaded line slices. It is the text-level core
+// shared with DiffFile, exported so a caller that already holds both versions
+// (for example the blame engine, which reads each file once via FileAt) can diff
+// without re-reading blobs. Hunk and line-numbering conventions are identical to
+// DiffFile.
+func Diff(parent, child []string) []Hunk {
+	return diffLines(parent, child)
+}
+
 // opKind is a single-line edit step used while building the hunk list.
 type opKind int
 
