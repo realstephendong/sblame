@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/realstephendong/sblame/internal/blame"
+	"github.com/realstephendong/sblame/internal/eval"
 	"github.com/realstephendong/sblame/internal/gitlayer"
 	"github.com/realstephendong/sblame/internal/types"
 )
@@ -15,13 +16,25 @@ import (
 func main() {
 	line := flag.Int("line", 0, "line number to blame (defaults to 1)")
 	rev := flag.String("rev", "HEAD", "revision to start the blame walk from")
+	evalMode := flag.Bool("eval", false, "run the built-in accuracy evaluation suite and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: sblame <file> [--line N] [--rev REV]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: sblame <file> [--line N] [--rev REV]\n")
+		fmt.Fprintf(os.Stderr, "       sblame --eval\n\n")
 		fmt.Fprintf(os.Stderr, "Semantic blame: find where code logic was genuinely authored,\n")
 		fmt.Fprintf(os.Stderr, "skipping cosmetic commits.\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	// --eval runs the accuracy suite instead of blaming a file, so it takes no
+	// file argument and must be handled before the positional-argument logic.
+	if *evalMode {
+		if err := eval.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "sblame: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Go's flag package stops at the first positional argument, so flags placed
 	// after the filename (e.g. "sblame file --line 2") would be ignored. Pull out
