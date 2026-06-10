@@ -19,8 +19,6 @@ package blame
 import (
 	"errors"
 	"fmt"
-	"strings"
-	"unicode"
 
 	"github.com/go-git/go-git/v5/plumbing/object"
 
@@ -61,13 +59,10 @@ type StepResult struct {
 	Confidence float64
 }
 
-// Per-step confidence multipliers. A comment-only skip is slightly less certain
-// than a whitespace skip because identifying comments — distinguishing a real
-// comment from a comment delimiter inside a string literal — is heuristic.
-const (
-	confExact       = 1.0 // UNCHANGED, AUTHORED, or whitespace-only skip
-	confCommentSkip = 0.9 // a comment-only COSMETIC skip
-)
+// confExact is the confidence multiplier for a step with no uncertainty: an
+// UNCHANGED step, an AUTHORED stop, or a whitespace-only skip. Comment-only
+// skips contribute less; see analyzeModification.
+const confExact = 1.0
 
 // Run performs the full blame walk: starting from start, it follows first-parent
 // history, remapping the tracked range at each step, until it reaches the commit
@@ -135,23 +130,27 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 
 	hunks := gitlayer.Diff(parentLines, childLines)
 	overlap := overlappingHunks(hunks, lr.Start, lr.End)
-	style, hasStyle := styleForPath(lr.FilePath)
+	// An unknown extension yields the zero commentStyle, which the tokenizer
+	// treats as the safe fallback (whitespace-only cosmetic detection).
+	style, _ := styleForPath(lr.FilePath)
 
 	hasAdded := false
 	hasModified := false
 	hasRealModification := false
-	hasCommentSkip := false // a modification that is cosmetic only after comments are stripped
+	// stepConfidence is the weakest (lowest) confidence over the cosmetic hunks
+	// touching the range; the step is only as certain as its least certain skip.
+	stepConfidence := confExact
 	for _, hk := range overlap {
 		switch hk.Kind {
 		case gitlayer.Added:
 			hasAdded = true
 		case gitlayer.Modified:
 			hasModified = true
-			switch classifyModification(parentLines, childLines, hk, style, hasStyle) {
-			case notCosmetic:
+			cosmetic, confidence := analyzeModification(parentLines, childLines, hk, style)
+			if !cosmetic {
 				hasRealModification = true
-			case cosmeticComment:
-				hasCommentSkip = true
+			} else if confidence < stepConfidence {
+				stepConfidence = confidence
 			}
 		}
 	}
@@ -168,9 +167,7 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 	confidence := confExact
 	if hasModified {
 		class = types.COSMETIC
-		if hasCommentSkip {
-			confidence = confCommentSkip
-		}
+		confidence = stepConfidence
 	}
 	return &StepResult{
 		Classification: class,
@@ -199,42 +196,6 @@ func overlappingHunks(hunks []gitlayer.Hunk, start, end int) []gitlayer.Hunk {
 		}
 	}
 	return out
-}
-
-// cosmeticKind classifies how "cosmetic" a Modified hunk is: not at all, only
-// in whitespace, or only in comments (and whitespace).
-type cosmeticKind int
-
-const (
-	// notCosmetic: the code genuinely differs; the change is authored.
-	notCosmetic cosmeticKind = iota
-	// cosmeticWhitespace: the blocks are equal once whitespace is removed.
-	cosmeticWhitespace
-	// cosmeticComment: the blocks differ in whitespace and/or comments, but are
-	// equal once comments are also stripped. Only reachable when the file's
-	// language has a known comment style.
-	cosmeticComment
-)
-
-// classifyModification decides whether a Modified hunk's change is cosmetic, and
-// if so of which kind. It first tries the cheap, language-agnostic whitespace
-// test (also the safe fallback when no comment style is known), then, for files
-// with a known comment style, the comment-aware test.
-//
-// Heuristic limit (whitespace test): stripping all whitespace ignores line
-// boundaries, so a reflow that moves tokens across line breaks is treated as
-// cosmetic even though it could be semantically meaningful.
-func classifyModification(parentLines, childLines []string, hk gitlayer.Hunk, style commentStyle, hasStyle bool) cosmeticKind {
-	parentBlock := sliceLines(parentLines, hk.ParentStart, hk.ParentLen)
-	childBlock := sliceLines(childLines, hk.ChildStart, hk.ChildLen)
-
-	if normalizeWhitespace(parentBlock) == normalizeWhitespace(childBlock) {
-		return cosmeticWhitespace
-	}
-	if hasStyle && codeSkeleton(parentBlock, style) == codeSkeleton(childBlock, style) {
-		return cosmeticComment
-	}
-	return notCosmetic
 }
 
 // parentSpan is an inclusive 1-based line range in the parent.
@@ -303,20 +264,6 @@ func sliceLines(lines []string, start, length int) []string {
 		return nil
 	}
 	return lines[lo:hi]
-}
-
-// normalizeWhitespace concatenates the lines with every whitespace rune removed,
-// so two blocks compare equal iff they differ only in whitespace.
-func normalizeWhitespace(block []string) string {
-	var b strings.Builder
-	for _, line := range block {
-		for _, r := range line {
-			if !unicode.IsSpace(r) {
-				b.WriteRune(r)
-			}
-		}
-	}
-	return b.String()
 }
 
 // validateRange checks that lr is a sane 1-based range within an n-line file.

@@ -149,6 +149,16 @@ func builtinCases() []Case {
 			minConf:    0.9,
 		},
 		{
+			// A one-word comment tweak should dent confidence far less than a
+			// full reword, since most of the comment is unchanged.
+			name:       "small comment tweak keeps high confidence",
+			path:       "x.go",
+			history:    []version{{"alice", []string{"x := 1 // returns the running total"}}, {"bob", []string{"x := 1 // returns the running sum"}}},
+			queryLine:  1,
+			wantAuthor: "alice",
+			minConf:    0.95,
+		},
+		{
 			name:       "// inside a string is a code change, not a comment",
 			path:       "x.go",
 			history:    []version{{"alice", []string{`u := "http://a"`}}, {"bob", []string{`u := "http://b"`}}},

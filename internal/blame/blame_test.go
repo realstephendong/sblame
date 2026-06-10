@@ -319,6 +319,33 @@ func TestClassifyStep(t *testing.T) {
 			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
 			wantClass:  types.AUTHORED,
 		},
+		{
+			// Token-level: spacing around operators changes no code tokens.
+			name:       "operator spacing is cosmetic",
+			parentLine: []string{"x := a+b*c"},
+			childLine:  []string{"x  :=  a + b * c"},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.COSMETIC,
+			wantRange:  types.LineRange{FilePath: testPath, Start: 1, End: 1},
+		},
+		{
+			// Token-level: removing the space fuses two identifiers into one
+			// token, a real change the old whitespace-stripping missed.
+			name:       "joining two identifiers is authored",
+			parentLine: []string{"foo bar"},
+			childLine:  []string{"foobar"},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.AUTHORED,
+		},
+		{
+			// Token-level: whitespace inside a string literal is part of the
+			// (single) string token, so changing it is a real change.
+			name:       "whitespace inside a string is authored",
+			parentLine: []string{`msg := "a b"`},
+			childLine:  []string{`msg := "a  b"`},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.AUTHORED,
+		},
 	}
 
 	for _, tt := range tests {
