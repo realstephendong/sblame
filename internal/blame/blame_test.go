@@ -198,6 +198,53 @@ func TestRun_MissingFileInStartCommit(t *testing.T) {
 	}
 }
 
+func TestRun_SkipsCommentOnlyChangeWithReducedConfidence(t *testing.T) {
+	// alice writes the line; bob only rewords its trailing comment. The line is
+	// attributed to alice, but confidence drops below 1.0 because skipping a
+	// comment-only change relies on heuristic comment detection.
+	f, commits := build(t, []struct {
+		author string
+		lines  []string
+	}{
+		{"alice", []string{"func f() {", "\treturn 1 // base case", "}"}},
+		{"bob", []string{"func f() {", "\treturn 1 // handles the empty input", "}"}},
+	})
+	head := commits[1]
+
+	result, err := Run(f, head, types.LineRange{FilePath: testPath, Start: 2, End: 2})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Author != "alice" {
+		t.Errorf("author: got %q, want %q (comment-only change should be skipped)", result.Author, "alice")
+	}
+	if result.Confidence >= 1.0 {
+		t.Errorf("confidence: got %v, want < 1.0 for a comment-only skip", result.Confidence)
+	}
+}
+
+func TestRun_WhitespaceSkipKeepsFullConfidence(t *testing.T) {
+	// A whitespace-only reformat is a safe skip, so confidence stays at 1.0.
+	f, commits := build(t, []struct {
+		author string
+		lines  []string
+	}{
+		{"alice", []string{"return 1"}},
+		{"bob", []string{"  return   1"}},
+	})
+
+	result, err := Run(f, commits[1], types.LineRange{FilePath: testPath, Start: 1, End: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Author != "alice" {
+		t.Errorf("author: got %q, want %q", result.Author, "alice")
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("confidence: got %v, want 1.0 for a whitespace-only skip", result.Confidence)
+	}
+}
+
 func TestClassifyStep(t *testing.T) {
 	parent := mkCommit(1, "alice")
 	child := mkCommit(2, "bob")
@@ -245,6 +292,30 @@ func TestClassifyStep(t *testing.T) {
 			name:       "file absent in parent is authored",
 			fileAbsent: true,
 			childLine:  []string{"a"},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.AUTHORED,
+		},
+		{
+			name:       "comment-only change is cosmetic",
+			parentLine: []string{"x", "y := 1 // old", "z"},
+			childLine:  []string{"x", "y := 1 // a clearer note", "z"},
+			lr:         types.LineRange{FilePath: testPath, Start: 2, End: 2},
+			wantClass:  types.COSMETIC,
+			wantRange:  types.LineRange{FilePath: testPath, Start: 2, End: 2},
+		},
+		{
+			name:       "code change alongside comment is authored",
+			parentLine: []string{"y := 1 // note"},
+			childLine:  []string{"y := 2 // note"},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.AUTHORED,
+		},
+		{
+			// The "//" is inside a string literal, not a comment, so the change
+			// to the URL is a genuine code change — not a cosmetic comment edit.
+			name:       "comment delimiter inside a string is not a comment",
+			parentLine: []string{`u := "http://a"`},
+			childLine:  []string{`u := "http://b"`},
 			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
 			wantClass:  types.AUTHORED,
 		},

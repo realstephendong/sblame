@@ -51,7 +51,23 @@ type StepResult struct {
 	// NewRange is the range to continue tracking in the parent. It is only
 	// meaningful for UNCHANGED and COSMETIC.
 	NewRange types.LineRange
+
+	// Confidence is a per-step multiplier in (0, 1] expressing how certain the
+	// classification is. It is 1.0 for UNCHANGED and AUTHORED (exact, textual
+	// decisions) and for whitespace-only COSMETIC skips. It drops below 1.0 for
+	// a comment-only COSMETIC skip, because comment detection is heuristic; Run
+	// multiplies these together so an attribution reached past fuzzier skips
+	// reports lower overall confidence.
+	Confidence float64
 }
+
+// Per-step confidence multipliers. A comment-only skip is slightly less certain
+// than a whitespace skip because identifying comments — distinguishing a real
+// comment from a comment delimiter inside a string literal — is heuristic.
+const (
+	confExact       = 1.0 // UNCHANGED, AUTHORED, or whitespace-only skip
+	confCommentSkip = 0.9 // a comment-only COSMETIC skip
+)
 
 // Run performs the full blame walk: starting from start, it follows first-parent
 // history, remapping the tracked range at each step, until it reaches the commit
@@ -70,11 +86,12 @@ func Run(h History, start *object.Commit, lr types.LineRange) (*types.BlameResul
 
 	commit := start
 	cur := lr
+	conf := 1.0 // accumulated confidence, reduced by each fuzzy (comment) skip
 	for {
 		parent, err := h.Parent(commit)
 		if errors.Is(err, gitlayer.ErrRootCommit) {
 			// No parent to compare against: the lines originate here.
-			return attribute(commit), nil
+			return attribute(commit, conf), nil
 		}
 		if err != nil {
 			return nil, err
@@ -87,8 +104,9 @@ func Run(h History, start *object.Commit, lr types.LineRange) (*types.BlameResul
 
 		switch step.Classification {
 		case types.AUTHORED:
-			return attribute(commit), nil
+			return attribute(commit, conf), nil
 		case types.UNCHANGED, types.COSMETIC:
+			conf *= step.Confidence
 			commit = parent
 			cur = step.NewRange
 		default:
@@ -106,7 +124,7 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 		if errors.Is(err, gitlayer.ErrFileNotFound) {
 			// The file is absent in the parent, so it — and the tracked lines —
 			// first appeared at the child. Authored here.
-			return &StepResult{Classification: types.AUTHORED}, nil
+			return &StepResult{Classification: types.AUTHORED, Confidence: confExact}, nil
 		}
 		return nil, err
 	}
@@ -117,33 +135,42 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 
 	hunks := gitlayer.Diff(parentLines, childLines)
 	overlap := overlappingHunks(hunks, lr.Start, lr.End)
+	style, hasStyle := styleForPath(lr.FilePath)
 
 	hasAdded := false
 	hasModified := false
 	hasRealModification := false
+	hasCommentSkip := false // a modification that is cosmetic only after comments are stripped
 	for _, hk := range overlap {
 		switch hk.Kind {
 		case gitlayer.Added:
 			hasAdded = true
 		case gitlayer.Modified:
 			hasModified = true
-			if !isCosmeticModification(parentLines, childLines, hk) {
+			switch classifyModification(parentLines, childLines, hk, style, hasStyle) {
+			case notCosmetic:
 				hasRealModification = true
+			case cosmeticComment:
+				hasCommentSkip = true
 			}
 		}
 	}
 
 	// Pure additions and genuine modifications are authored at the child.
 	if hasAdded || hasRealModification {
-		return &StepResult{Classification: types.AUTHORED}, nil
+		return &StepResult{Classification: types.AUTHORED, Confidence: confExact}, nil
 	}
 
 	// Otherwise the range survives into the parent unchanged, or was only
-	// reformatted (cosmetic). Either way, remap it and keep walking.
+	// reformatted/recommented (cosmetic). Either way, remap it and keep walking.
 	span := mapRangeToParent(overlap, lr)
 	class := types.UNCHANGED
+	confidence := confExact
 	if hasModified {
 		class = types.COSMETIC
+		if hasCommentSkip {
+			confidence = confCommentSkip
+		}
 	}
 	return &StepResult{
 		Classification: class,
@@ -152,6 +179,7 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 			Start:    span.start,
 			End:      span.end,
 		},
+		Confidence: confidence,
 	}, nil
 }
 
@@ -173,18 +201,40 @@ func overlappingHunks(hunks []gitlayer.Hunk, start, end int) []gitlayer.Hunk {
 	return out
 }
 
-// isCosmeticModification reports whether a Modified hunk's parent block and child
-// block are equal once all whitespace is removed — i.e. the change is purely
-// reindentation/reformatting.
+// cosmeticKind classifies how "cosmetic" a Modified hunk is: not at all, only
+// in whitespace, or only in comments (and whitespace).
+type cosmeticKind int
+
+const (
+	// notCosmetic: the code genuinely differs; the change is authored.
+	notCosmetic cosmeticKind = iota
+	// cosmeticWhitespace: the blocks are equal once whitespace is removed.
+	cosmeticWhitespace
+	// cosmeticComment: the blocks differ in whitespace and/or comments, but are
+	// equal once comments are also stripped. Only reachable when the file's
+	// language has a known comment style.
+	cosmeticComment
+)
+
+// classifyModification decides whether a Modified hunk's change is cosmetic, and
+// if so of which kind. It first tries the cheap, language-agnostic whitespace
+// test (also the safe fallback when no comment style is known), then, for files
+// with a known comment style, the comment-aware test.
 //
-// Heuristic and its limit: stripping all whitespace also ignores line boundaries,
-// so a reflow that moves tokens across line breaks is treated as cosmetic even
-// though it could be semantically meaningful. This is an intentional Month-2
-// simplification.
-func isCosmeticModification(parentLines, childLines []string, hk gitlayer.Hunk) bool {
+// Heuristic limit (whitespace test): stripping all whitespace ignores line
+// boundaries, so a reflow that moves tokens across line breaks is treated as
+// cosmetic even though it could be semantically meaningful.
+func classifyModification(parentLines, childLines []string, hk gitlayer.Hunk, style commentStyle, hasStyle bool) cosmeticKind {
 	parentBlock := sliceLines(parentLines, hk.ParentStart, hk.ParentLen)
 	childBlock := sliceLines(childLines, hk.ChildStart, hk.ChildLen)
-	return normalizeWhitespace(parentBlock) == normalizeWhitespace(childBlock)
+
+	if normalizeWhitespace(parentBlock) == normalizeWhitespace(childBlock) {
+		return cosmeticWhitespace
+	}
+	if hasStyle && codeSkeleton(parentBlock, style) == codeSkeleton(childBlock, style) {
+		return cosmeticComment
+	}
+	return notCosmetic
 }
 
 // parentSpan is an inclusive 1-based line range in the parent.
@@ -281,12 +331,14 @@ func validateRange(lr types.LineRange, n int) error {
 }
 
 // attribute builds the final BlameResult for the commit the range is attributed
-// to. Confidence is currently always 1.0; richer heuristic scoring is future work.
-func attribute(c *object.Commit) *types.BlameResult {
+// to. confidence is the walk's accumulated certainty: 1.0 when authorship was
+// reached only past exact (UNCHANGED) and whitespace-only steps, and lower when
+// the walk skipped one or more comment-only changes.
+func attribute(c *object.Commit, confidence float64) *types.BlameResult {
 	return &types.BlameResult{
 		Author:     c.Author.Name,
 		Date:       c.Author.When,
 		CommitHash: c.Hash.String(),
-		Confidence: 1.0,
+		Confidence: confidence,
 	}
 }
