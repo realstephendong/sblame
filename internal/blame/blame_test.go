@@ -223,6 +223,29 @@ func TestRun_SkipsCommentOnlyChangeWithReducedConfidence(t *testing.T) {
 	}
 }
 
+func TestRun_SkipsConsistentRename(t *testing.T) {
+	// alice writes the logic; bob renames an identifier consistently. The line is
+	// still alice's, at reduced confidence (a rename edits real code).
+	f, commits := build(t, []struct {
+		author string
+		lines  []string
+	}{
+		{"alice", []string{"sum := total + total"}},
+		{"bob", []string{"sum := amount + amount"}},
+	})
+
+	result, err := Run(f, commits[1], types.LineRange{FilePath: testPath, Start: 1, End: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Author != "alice" {
+		t.Errorf("author: got %q, want %q (consistent rename should be skipped)", result.Author, "alice")
+	}
+	if result.Confidence >= 1.0 {
+		t.Errorf("confidence: got %v, want < 1.0 for a rename skip", result.Confidence)
+	}
+}
+
 func TestRun_WhitespaceSkipKeepsFullConfidence(t *testing.T) {
 	// A whitespace-only reformat is a safe skip, so confidence stays at 1.0.
 	f, commits := build(t, []struct {
@@ -343,6 +366,25 @@ func TestClassifyStep(t *testing.T) {
 			name:       "whitespace inside a string is authored",
 			parentLine: []string{`msg := "a b"`},
 			childLine:  []string{`msg := "a  b"`},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.AUTHORED,
+		},
+		{
+			// Rung 2: an identifier renamed consistently (and occurring twice) is
+			// a cosmetic rename, not authorship.
+			name:       "consistent rename is cosmetic",
+			parentLine: []string{"x := userId + userId"},
+			childLine:  []string{"x := userID + userID"},
+			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
+			wantClass:  types.COSMETIC,
+			wantRange:  types.LineRange{FilePath: testPath, Start: 1, End: 1},
+		},
+		{
+			// Rung 2 safety: a single-occurrence identifier change is a real
+			// change (e.g. calling a different function), not a rename.
+			name:       "single-occurrence swap is authored",
+			parentLine: []string{"x := foo()"},
+			childLine:  []string{"x := bar()"},
 			lr:         types.LineRange{FilePath: testPath, Start: 1, End: 1},
 			wantClass:  types.AUTHORED,
 		},

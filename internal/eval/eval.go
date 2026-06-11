@@ -175,6 +175,24 @@ func builtinCases() []Case {
 			minConf:    1.0,
 		},
 		{
+			// Rung 2: a consistently renamed identifier is skipped to the author.
+			name:       "consistent rename is skipped",
+			path:       "x.go",
+			history:    []version{{"alice", []string{"sum := total + total"}}, {"bob", []string{"sum := amount + amount"}}},
+			queryLine:  1,
+			wantAuthor: "alice",
+			minConf:    0.8,
+		},
+		{
+			// Rung 2 safety: a one-off symbol swap is a real change, not a rename.
+			name:       "single-occurrence swap is authored",
+			path:       "x.go",
+			history:    []version{{"alice", []string{"x := foo()"}}, {"bob", []string{"x := bar()"}}},
+			queryLine:  1,
+			wantAuthor: "bob",
+			minConf:    1.0,
+		},
+		{
 			name:       "reindent then header shift still finds origin",
 			path:       "x.go",
 			history:    []version{{"alice", []string{"func foo() {", "  return 1", "}"}}, {"bob", []string{"func foo() {", "      return 1", "}"}}, {"carol", []string{"// header", "func foo() {", "      return 1", "}"}}},

@@ -133,6 +133,10 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 	// An unknown extension yields the zero commentStyle, which the tokenizer
 	// treats as the safe fallback (whitespace-only cosmetic detection).
 	style, _ := styleForPath(lr.FilePath)
+	// Rung 2: if the whole file change is a consistent rename, every modified
+	// hunk in it is cosmetic. This is a property of the file pair, so it is
+	// computed once here rather than per hunk.
+	renameStep := isGoFile(lr.FilePath) && detectGoRename(parentLines, childLines)
 
 	hasAdded := false
 	hasModified := false
@@ -146,6 +150,15 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 			hasAdded = true
 		case gitlayer.Modified:
 			hasModified = true
+			if renameStep {
+				ratio := goRenameRatio(
+					sliceLines(parentLines, hk.ParentStart, hk.ParentLen),
+					sliceLines(childLines, hk.ChildStart, hk.ChildLen))
+				if conf := confExact - renamePenalty*ratio; conf < stepConfidence {
+					stepConfidence = conf
+				}
+				continue // cosmetic rename: not a real modification
+			}
 			cosmetic, confidence := analyzeModification(parentLines, childLines, hk, style)
 			if !cosmetic {
 				hasRealModification = true
