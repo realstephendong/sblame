@@ -1,8 +1,6 @@
-# sblame — Semantic Blame
+# sblame, semantic blame
 
 `sblame` walks git history to find where code logic was genuinely authored, skipping cosmetic commits (whitespace changes, reformatting, renames, moves).
-
-**Status: Month 1 scaffolding** — the project structure, types, and stubs are in place. Core traversal, diffing, and classification logic is not yet implemented.
 
 ## Build
 
