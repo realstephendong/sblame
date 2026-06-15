@@ -17,22 +17,28 @@ func main() {
 	line := flag.Int("line", 0, "line number to blame (defaults to 1)")
 	rev := flag.String("rev", "HEAD", "revision to start the blame walk from")
 	evalMode := flag.Bool("eval", false, "run the built-in accuracy evaluation suite and exit")
+	langMode := flag.Bool("languages", false, "list the languages and their level of support, then exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: sblame <file> [--line N] [--rev REV]\n")
-		fmt.Fprintf(os.Stderr, "       sblame --eval\n\n")
+		fmt.Fprintf(os.Stderr, "       sblame --eval\n")
+		fmt.Fprintf(os.Stderr, "       sblame --languages\n\n")
 		fmt.Fprintf(os.Stderr, "Semantic blame: find where code logic was genuinely authored,\n")
 		fmt.Fprintf(os.Stderr, "skipping cosmetic commits.\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	// --eval runs the accuracy suite instead of blaming a file, so it takes no
+	// --eval and --languages report instead of blaming a file, so they take no
 	// file argument and must be handled before the positional-argument logic.
 	if *evalMode {
 		if err := eval.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "sblame: %v\n", err)
 			os.Exit(1)
 		}
+		return
+	}
+	if *langMode {
+		printLanguages()
 		return
 	}
 
@@ -91,6 +97,20 @@ func run(fileArg string, line int, rev string) error {
 	fmt.Printf("  date   %s\n", result.Date.Format("2006-01-02"))
 	fmt.Printf("  line   %s:%d\n", relPath, lr.Start)
 	return nil
+}
+
+// printLanguages reports, by tier, which file extensions get which level of
+// cosmetic-change detection. Extensions in neither tier still work at the
+// whitespace-only baseline.
+func printLanguages() {
+	rename, commentOnly := blame.SupportedExtensions()
+	fmt.Println("Language support by file extension. Every other extension is")
+	fmt.Println("handled at the whitespace-only baseline.")
+	fmt.Println()
+	fmt.Println("Rename + comment + whitespace (full structural detection):")
+	fmt.Printf("  %s\n\n", strings.Join(rename, " "))
+	fmt.Println("Comment + whitespace (no rename detection):")
+	fmt.Printf("  %s\n", strings.Join(commentOnly, " "))
 }
 
 // repoRelPath converts an absolute filesystem path into a slash-separated path

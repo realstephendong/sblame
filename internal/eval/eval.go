@@ -184,6 +184,17 @@ func builtinCases() []Case {
 			minConf:    0.8,
 		},
 		{
+			// Rung 2 cross-language: the same rename skip via tree-sitter, on a
+			// non-Go file (Python). data -> info is consistent and recurs, so the
+			// line stays with its author.
+			name:       "consistent rename is skipped (python)",
+			path:       "x.py",
+			history:    []version{{"alice", []string{"def run(x):", "    return data + data"}}, {"bob", []string{"def run(x):", "    return info + info"}}},
+			queryLine:  2,
+			wantAuthor: "alice",
+			minConf:    0.8,
+		},
+		{
 			// Rung 2 safety: a one-off symbol swap is a real change, not a rename.
 			name:       "single-occurrence swap is authored",
 			path:       "x.go",

@@ -135,8 +135,10 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 	style, _ := styleForPath(lr.FilePath)
 	// Rung 2: if the whole file change is a consistent rename, every modified
 	// hunk in it is cosmetic. This is a property of the file pair, so it is
-	// computed once here rather than per hunk.
-	renameStep := isGoFile(lr.FilePath) && detectGoRename(parentLines, childLines)
+	// computed once here rather than per hunk. lexer is nil for languages with no
+	// structural lexer, where rename detection is skipped.
+	lexer := lexerForPath(lr.FilePath)
+	renameStep := lexer != nil && detectRename(lexer, parentLines, childLines)
 
 	hasAdded := false
 	hasModified := false
@@ -151,7 +153,7 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 		case gitlayer.Modified:
 			hasModified = true
 			if renameStep {
-				ratio := goRenameRatio(
+				ratio := renameRatio(lexer,
 					sliceLines(parentLines, hk.ParentStart, hk.ParentLen),
 					sliceLines(childLines, hk.ChildStart, hk.ChildLen))
 				if conf := confExact - renamePenalty*ratio; conf < stepConfidence {
