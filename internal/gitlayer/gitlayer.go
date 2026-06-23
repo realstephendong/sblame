@@ -36,8 +36,8 @@ var (
 
 	// ErrFileNotFound is returned by FileAt when the path does not exist in the
 	// commit's tree. The blame engine treats this as a distinct signal — a file
-	// being absent at a commit is meaningful (e.g. for move detection later),
-	// not just a generic failure.
+	// being absent at a commit is meaningful: it triggers rename detection (see
+	// RenameSource) rather than being a generic failure.
 	ErrFileNotFound = errors.New("gitlayer: file not found at commit")
 )
 

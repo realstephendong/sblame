@@ -143,9 +143,9 @@ func TestClassifyStep_TreeSitterRename(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := &fakeHistory{lines: map[plumbing.Hash][]string{
-				child.Hash:  tt.childLine,
-				parent.Hash: tt.parentLine,
+			f := &fakeHistory{files: map[plumbing.Hash]fileMap{
+				child.Hash:  {tt.path: tt.childLine},
+				parent.Hash: {tt.path: tt.parentLine},
 			}}
 
 			step, err := ClassifyStep(f, child, parent, tt.lr)
@@ -172,12 +172,12 @@ func TestClassifyStep_TreeSitterRename(t *testing.T) {
 // bob renames an identifier consistently, so the line stays alice's at reduced
 // confidence.
 func TestRun_SkipsCrossLanguageRename(t *testing.T) {
-	f, commits := build(t, []struct {
+	f, commits := buildFiles(t, []struct {
 		author string
-		lines  []string
+		files  fileMap
 	}{
-		{"alice", []string{"def f(amount):", "    return amount + amount"}},
-		{"bob", []string{"def f(value):", "    return value + value"}},
+		{author: "alice", files: fileMap{"f.py": {"def f(amount):", "    return amount + amount"}}},
+		{author: "bob", files: fileMap{"f.py": {"def f(value):", "    return value + value"}}},
 	})
 
 	result, err := Run(f, commits[1], types.LineRange{FilePath: "f.py", Start: 2, End: 2})

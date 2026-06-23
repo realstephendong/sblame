@@ -10,10 +10,16 @@
 //     skip this commit and continue walking into the parent.
 //   - AUTHORED: the lines contain a genuine (non-whitespace) change, or are newly
 //     introduced here; stop and attribute authorship to this commit.
-//   - MOVED: the lines relocated to a different file. Cross-file move detection
-//     is not yet implemented — the diff layer is single-file — so the engine does
-//     not currently produce MOVED. A within-file relocation surfaces as an
-//     AUTHORED change at the commit that moved it. (Future work.)
+//
+// File renames are followed: when the tracked file is absent in the parent, the
+// engine asks the history layer for a rename source (a deleted file whose content
+// is similar enough) and, if one is found, continues the walk under the old path
+// — so a line's history survives a `git mv`. See gitlayer.RenameSource.
+//
+// Cross-file COPY detection (a line range moved from another file that still
+// exists — git's `-C`) and within-commit line moves are not yet implemented; such
+// a relocation still surfaces as an AUTHORED change at the commit that moved it.
+// The MOVED classification is reserved for that future work. (Future work.)
 package blame
 
 import (
@@ -37,6 +43,14 @@ type History interface {
 	// FileAt returns the lines of path at commit, or an error wrapping
 	// gitlayer.ErrFileNotFound when the path is absent there.
 	FileAt(commit *object.Commit, path string) ([]string, error)
+
+	// RenameSource reports whether newPath in child was renamed from a different
+	// path in parent. When it was, ok is true, oldPath is the pre-rename path,
+	// and score is the content similarity in (0, 1] (1.0 for an exact rename).
+	// When no rename source is found ok is false, and the caller treats newPath
+	// as newly introduced at child. It is called only when newPath is absent in
+	// parent. *gitlayer.Repo satisfies it via its own similarity matching.
+	RenameSource(child, parent *object.Commit, newPath string) (oldPath string, score float64, ok bool, err error)
 }
 
 // StepResult holds the outcome of classifying one commit-to-parent step. When
@@ -51,9 +65,11 @@ type StepResult struct {
 	NewRange types.LineRange
 
 	// Confidence is a per-step multiplier in (0, 1] expressing how certain the
-	// classification is. It is 1.0 for UNCHANGED and AUTHORED (exact, textual
-	// decisions) and for whitespace-only COSMETIC skips. It drops below 1.0 for
-	// a comment-only COSMETIC skip, because comment detection is heuristic; Run
+	// classification is. It is 1.0 for AUTHORED and for an UNCHANGED or
+	// whitespace-only COSMETIC step that did not cross a fuzzy rename. It drops
+	// below 1.0 for a comment-only COSMETIC skip (comment detection is heuristic)
+	// and for any step that continues across a similarity-matched file rename
+	// (the rename match is heuristic too — an exact rename costs nothing). Run
 	// multiplies these together so an attribution reached past fuzzier skips
 	// reports lower overall confidence.
 	Confidence float64
@@ -63,6 +79,21 @@ type StepResult struct {
 // UNCHANGED step, an AUTHORED stop, or a whitespace-only skip. Comment-only
 // skips contribute less; see analyzeModification.
 const confExact = 1.0
+
+// fileRenamePenalty is the most a similarity-matched file rename can reduce
+// confidence, reached as the match approaches the rename threshold. An exact
+// rename (identical content, similarity 1.0) is certain and costs nothing. This
+// is distinct from structrename.go's renamePenalty, which is about an identifier
+// being renamed *within* a file; this is about the whole file being renamed.
+const fileRenamePenalty = 0.2
+
+// confForFileRename maps a rename similarity score to a confidence multiplier:
+// 1.0 for an exact rename, falling linearly to confExact-fileRenamePenalty as the
+// score approaches 0. Crossing a heuristically-matched rename is less certain
+// than crossing one git could prove by hash.
+func confForFileRename(score float64) float64 {
+	return confExact - fileRenamePenalty*(1-score)
+}
 
 // Run performs the full blame walk: starting from start, it follows first-parent
 // history, remapping the tracked range at each step, until it reaches the commit
@@ -114,14 +145,34 @@ func Run(h History, start *object.Commit, lr types.LineRange) (*types.BlameResul
 // its parent for a single file, returning whether to stop (AUTHORED) or continue
 // (UNCHANGED/COSMETIC) and, if continuing, the range remapped into the parent.
 func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (*StepResult, error) {
-	parentLines, err := h.FileAt(parent, lr.FilePath)
+	// The parent side is normally the same path as the child. When the file is
+	// absent in the parent it may have been renamed; if so, parentPath becomes
+	// the old path and the walk continues there. renameConf is the cost of that
+	// (heuristic) rename match: 1.0 for an exact rename, less for a fuzzy one.
+	parentPath := lr.FilePath
+	renameConf := confExact
+	parentLines, err := h.FileAt(parent, parentPath)
 	if err != nil {
-		if errors.Is(err, gitlayer.ErrFileNotFound) {
-			// The file is absent in the parent, so it — and the tracked lines —
-			// first appeared at the child. Authored here.
+		if !errors.Is(err, gitlayer.ErrFileNotFound) {
+			return nil, err
+		}
+		// The path is absent in the parent: either the file was genuinely
+		// introduced at the child, or it was renamed from another path. Ask the
+		// history layer for a rename source.
+		oldPath, score, ok, rerr := h.RenameSource(child, parent, lr.FilePath)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if !ok {
+			// No rename source: the lines first appeared at the child.
 			return &StepResult{Classification: types.AUTHORED, Confidence: confExact}, nil
 		}
-		return nil, err
+		parentPath = oldPath
+		renameConf = confForFileRename(score)
+		parentLines, err = h.FileAt(parent, parentPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	childLines, err := h.FileAt(child, lr.FilePath)
 	if err != nil {
@@ -176,7 +227,11 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 	}
 
 	// Otherwise the range survives into the parent unchanged, or was only
-	// reformatted/recommented (cosmetic). Either way, remap it and keep walking.
+	// reformatted/recommented (cosmetic). Either way, remap it — into the parent's
+	// path, which differs from the child's when we crossed a rename — and keep
+	// walking. Confidence combines the cosmetic-skip certainty with the rename
+	// match: an exact (or absent) rename leaves renameConf at 1.0, so this matches
+	// the non-rename behavior.
 	span := mapRangeToParent(overlap, lr)
 	class := types.UNCHANGED
 	confidence := confExact
@@ -187,11 +242,11 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 	return &StepResult{
 		Classification: class,
 		NewRange: types.LineRange{
-			FilePath: lr.FilePath,
+			FilePath: parentPath,
 			Start:    span.start,
 			End:      span.end,
 		},
-		Confidence: confidence,
+		Confidence: confidence * renameConf,
 	}, nil
 }
 

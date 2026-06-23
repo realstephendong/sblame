@@ -33,6 +33,10 @@ import (
 type version struct {
 	author string
 	lines  []string
+	// path is the file's path at this commit; empty means the Case's path. Set
+	// it on a renamed file's pre-rename versions so the walk has a rename to
+	// follow. It is the last field so existing positional literals stay valid.
+	path string
 }
 
 // Case is one evaluation scenario: a linear history (oldest first), a line to
@@ -135,7 +139,7 @@ func builtinCases() []Case {
 		{
 			name:       "whitespace-only reformat is skipped",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"return 1"}}, {"bob", []string{"   return  1"}}},
+			history:    []version{{author: "alice", lines: []string{"return 1"}}, {author: "bob", lines: []string{"   return  1"}}},
 			queryLine:  1,
 			wantAuthor: "alice",
 			minConf:    1.0,
@@ -143,7 +147,7 @@ func builtinCases() []Case {
 		{
 			name:       "comment-only edit is skipped",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"func f() {", "\treturn 1 // base", "}"}}, {"bob", []string{"func f() {", "\treturn 1 // reworded for clarity", "}"}}},
+			history:    []version{{author: "alice", lines: []string{"func f() {", "\treturn 1 // base", "}"}}, {author: "bob", lines: []string{"func f() {", "\treturn 1 // reworded for clarity", "}"}}},
 			queryLine:  2,
 			wantAuthor: "alice",
 			minConf:    0.9,
@@ -153,7 +157,7 @@ func builtinCases() []Case {
 			// full reword, since most of the comment is unchanged.
 			name:       "small comment tweak keeps high confidence",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"x := 1 // returns the running total"}}, {"bob", []string{"x := 1 // returns the running sum"}}},
+			history:    []version{{author: "alice", lines: []string{"x := 1 // returns the running total"}}, {author: "bob", lines: []string{"x := 1 // returns the running sum"}}},
 			queryLine:  1,
 			wantAuthor: "alice",
 			minConf:    0.95,
@@ -161,7 +165,7 @@ func builtinCases() []Case {
 		{
 			name:       "// inside a string is a code change, not a comment",
 			path:       "x.go",
-			history:    []version{{"alice", []string{`u := "http://a"`}}, {"bob", []string{`u := "http://b"`}}},
+			history:    []version{{author: "alice", lines: []string{`u := "http://a"`}}, {author: "bob", lines: []string{`u := "http://b"`}}},
 			queryLine:  1,
 			wantAuthor: "bob",
 			minConf:    1.0,
@@ -169,7 +173,7 @@ func builtinCases() []Case {
 		{
 			name:       "genuine code change is authored",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"return 1"}}, {"bob", []string{"return 2"}}},
+			history:    []version{{author: "alice", lines: []string{"return 1"}}, {author: "bob", lines: []string{"return 2"}}},
 			queryLine:  1,
 			wantAuthor: "bob",
 			minConf:    1.0,
@@ -178,7 +182,7 @@ func builtinCases() []Case {
 			// Rung 2: a consistently renamed identifier is skipped to the author.
 			name:       "consistent rename is skipped",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"sum := total + total"}}, {"bob", []string{"sum := amount + amount"}}},
+			history:    []version{{author: "alice", lines: []string{"sum := total + total"}}, {author: "bob", lines: []string{"sum := amount + amount"}}},
 			queryLine:  1,
 			wantAuthor: "alice",
 			minConf:    0.8,
@@ -189,7 +193,7 @@ func builtinCases() []Case {
 			// line stays with its author.
 			name:       "consistent rename is skipped (python)",
 			path:       "x.py",
-			history:    []version{{"alice", []string{"def run(x):", "    return data + data"}}, {"bob", []string{"def run(x):", "    return info + info"}}},
+			history:    []version{{author: "alice", lines: []string{"def run(x):", "    return data + data"}}, {author: "bob", lines: []string{"def run(x):", "    return info + info"}}},
 			queryLine:  2,
 			wantAuthor: "alice",
 			minConf:    0.8,
@@ -198,7 +202,7 @@ func builtinCases() []Case {
 			// Rung 2 safety: a one-off symbol swap is a real change, not a rename.
 			name:       "single-occurrence swap is authored",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"x := foo()"}}, {"bob", []string{"x := bar()"}}},
+			history:    []version{{author: "alice", lines: []string{"x := foo()"}}, {author: "bob", lines: []string{"x := bar()"}}},
 			queryLine:  1,
 			wantAuthor: "bob",
 			minConf:    1.0,
@@ -206,7 +210,7 @@ func builtinCases() []Case {
 		{
 			name:       "reindent then header shift still finds origin",
 			path:       "x.go",
-			history:    []version{{"alice", []string{"func foo() {", "  return 1", "}"}}, {"bob", []string{"func foo() {", "      return 1", "}"}}, {"carol", []string{"// header", "func foo() {", "      return 1", "}"}}},
+			history:    []version{{author: "alice", lines: []string{"func foo() {", "  return 1", "}"}}, {author: "bob", lines: []string{"func foo() {", "      return 1", "}"}}, {author: "carol", lines: []string{"// header", "func foo() {", "      return 1", "}"}}},
 			queryLine:  4,
 			wantAuthor: "alice",
 			minConf:    1.0,
@@ -214,19 +218,48 @@ func builtinCases() []Case {
 		{
 			name:       "newly introduced file is authored",
 			path:       "x.go",
-			history:    []version{{"alice", nil}, {"bob", []string{"x := 1"}}},
+			history:    []version{{author: "alice", lines: nil}, {author: "bob", lines: []string{"x := 1"}}},
 			queryLine:  1,
 			wantAuthor: "bob",
 			minConf:    1.0,
 		},
+		{
+			// Part 1: an exact file rename (no content change) is followed across
+			// the rename, so the line stays with its original author at full
+			// confidence — a rename commit must not steal authorship.
+			name: "exact file rename is followed",
+			path: "new.go",
+			history: []version{
+				{author: "alice", path: "old.go", lines: []string{"x := compute()"}},
+				{author: "bob", lines: []string{"x := compute()"}}, // renamed, no edit
+			},
+			queryLine:  1,
+			wantAuthor: "alice",
+			minConf:    1.0,
+		},
+		{
+			// Part 1: a rename detected by similarity (the commit also edited an
+			// unrelated line) is still followed, but the surviving line is
+			// attributed at reduced confidence because the match is heuristic.
+			name: "similar file rename is followed at reduced confidence",
+			path: "renamed.go",
+			history: []version{
+				{author: "alice", path: "orig.go", lines: []string{"a := 1", "b := 2", "c := 3"}},
+				{author: "bob", lines: []string{"a := 1", "b := 2", "c := 99"}}, // renamed + edited line 3
+			},
+			queryLine:  1, // "a := 1", unchanged across the rename
+			wantAuthor: "alice",
+			minConf:    0.8,
+		},
 	}
 }
 
-// linearHistory is an in-memory blame.History over a single file's linear
-// commit chain. order[0] is the root; order[len-1] is the head.
+// linearHistory is an in-memory blame.History over a linear commit chain.
+// order[0] is the root; order[len-1] is the head. Each commit carries a small
+// file tree (path -> lines) so cases can model file renames.
 type linearHistory struct {
 	order []*object.Commit
-	lines map[plumbing.Hash][]string
+	files map[plumbing.Hash]map[string][]string
 }
 
 func (h *linearHistory) Parent(c *object.Commit) (*object.Commit, error) {
@@ -241,18 +274,37 @@ func (h *linearHistory) Parent(c *object.Commit) (*object.Commit, error) {
 	return nil, fmt.Errorf("eval: unknown commit %s", c.Hash)
 }
 
-func (h *linearHistory) FileAt(c *object.Commit, _ string) ([]string, error) {
-	lines, ok := h.lines[c.Hash]
+func (h *linearHistory) FileAt(c *object.Commit, path string) ([]string, error) {
+	lines, ok := h.files[c.Hash][path]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", gitlayer.ErrFileNotFound, c.Hash)
+		return nil, fmt.Errorf("%w: %s @ %s", gitlayer.ErrFileNotFound, path, c.Hash)
 	}
 	return lines, nil
+}
+
+// RenameSource finds, among the files present in parent but absent in child, the
+// one most similar to newPath — the in-memory analogue of gitlayer.RenameSource,
+// reusing the same matching so eval exercises the real cross-rename walk.
+func (h *linearHistory) RenameSource(child, parent *object.Commit, newPath string) (string, float64, bool, error) {
+	childFiles := h.files[child.Hash]
+	newLines, ok := childFiles[newPath]
+	if !ok {
+		return "", 0, false, nil
+	}
+	candidates := map[string][]string{}
+	for path, lines := range h.files[parent.Hash] {
+		if _, inChild := childFiles[path]; !inChild {
+			candidates[path] = lines
+		}
+	}
+	oldPath, score, found := gitlayer.BestRenameMatch(newLines, candidates, gitlayer.RenameThreshold)
+	return oldPath, score, found, nil
 }
 
 // buildHistory materializes a Case's versions into a linearHistory and returns
 // it with the head commit.
 func buildHistory(c Case) (*linearHistory, *object.Commit) {
-	h := &linearHistory{lines: map[plumbing.Hash][]string{}}
+	h := &linearHistory{files: map[plumbing.Hash]map[string][]string{}}
 	var head *object.Commit
 	for i, v := range c.history {
 		commit := &object.Commit{
@@ -261,7 +313,11 @@ func buildHistory(c Case) (*linearHistory, *object.Commit) {
 		}
 		h.order = append(h.order, commit)
 		if v.lines != nil {
-			h.lines[commit.Hash] = v.lines
+			path := v.path
+			if path == "" {
+				path = c.path
+			}
+			h.files[commit.Hash] = map[string][]string{path: v.lines}
 		}
 		head = commit
 	}

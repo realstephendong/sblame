@@ -235,3 +235,87 @@ func TestSplitLines_TrailingNewlineContract(t *testing.T) {
 		})
 	}
 }
+
+// renameCommit writes newPath with content, removes oldPath, and commits — the
+// result looks like a `git mv` (with an edit too when content differs from the
+// original).
+func renameCommit(t *testing.T, fs billy.Filesystem, wt *git.Worktree, oldPath, newPath, content, msg string) plumbing.Hash {
+	t.Helper()
+	f, err := fs.Create(newPath)
+	if err != nil {
+		t.Fatalf("fs.Create(%s): %v", newPath, err)
+	}
+	if _, err := f.Write([]byte(content)); err != nil {
+		t.Fatalf("write(%s): %v", newPath, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close(%s): %v", newPath, err)
+	}
+	if _, err := wt.Add(newPath); err != nil {
+		t.Fatalf("wt.Add(%s): %v", newPath, err)
+	}
+	if _, err := wt.Remove(oldPath); err != nil {
+		t.Fatalf("wt.Remove(%s): %v", oldPath, err)
+	}
+	h, err := wt.Commit(msg, &git.CommitOptions{Author: sig()})
+	if err != nil {
+		t.Fatalf("wt.Commit(%s): %v", msg, err)
+	}
+	return h
+}
+
+// mustResolve loads a commit by hash, failing the test on error.
+func mustResolve(t *testing.T, r *Repo, h plumbing.Hash) *object.Commit {
+	t.Helper()
+	c, err := r.CommitByHash(h.String())
+	if err != nil {
+		t.Fatalf("CommitByHash(%s): %v", h, err)
+	}
+	return c
+}
+
+func TestRenameSource(t *testing.T) {
+	r, fs, wt := newInMemoryRepo(t)
+	const content = "package main\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n"
+	c1 := commitFile(t, fs, wt, "math.go", content, "add math.go")
+	c2 := renameCommit(t, fs, wt, "math.go", "calc.go", content, "rename math.go -> calc.go")
+	const edited = "package main\n\nfunc Add(a, b int) int {\n\treturn a + b + 0\n}\n"
+	c3 := renameCommit(t, fs, wt, "calc.go", "arith.go", edited, "rename calc.go -> arith.go with edit")
+
+	t.Run("exact rename returns the old path at score 1.0", func(t *testing.T) {
+		old, score, ok, err := r.RenameSource(mustResolve(t, r, c2), mustResolve(t, r, c1), "calc.go")
+		if err != nil {
+			t.Fatalf("RenameSource: %v", err)
+		}
+		if !ok || old != "math.go" {
+			t.Fatalf("got (%q, %v, %v), want math.go", old, score, ok)
+		}
+		if score != 1.0 {
+			t.Errorf("score = %v, want 1.0 for an exact rename", score)
+		}
+	})
+
+	t.Run("similar rename returns the old path above threshold", func(t *testing.T) {
+		old, score, ok, err := r.RenameSource(mustResolve(t, r, c3), mustResolve(t, r, c2), "arith.go")
+		if err != nil {
+			t.Fatalf("RenameSource: %v", err)
+		}
+		if !ok || old != "calc.go" {
+			t.Fatalf("got (%q, %v, %v), want calc.go", old, score, ok)
+		}
+		if score < RenameThreshold || score >= 1.0 {
+			t.Errorf("score = %v, want in [%v, 1.0)", score, RenameThreshold)
+		}
+	})
+
+	t.Run("a genuinely new file has no rename source", func(t *testing.T) {
+		c4 := commitFile(t, fs, wt, "unrelated.go", "package main\n", "add unrelated.go")
+		_, _, ok, err := r.RenameSource(mustResolve(t, r, c4), mustResolve(t, r, c3), "unrelated.go")
+		if err != nil {
+			t.Fatalf("RenameSource: %v", err)
+		}
+		if ok {
+			t.Error("expected no rename source for a brand-new file")
+		}
+	})
+}
