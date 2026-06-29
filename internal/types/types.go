@@ -21,9 +21,9 @@ const (
 	// The engine stops and attributes authorship to this commit.
 	AUTHORED
 
-	// MOVED means the lines were relocated from another file or position
-	// without semantic change. The engine continues walking with the
-	// updated file/range coordinates.
+	// MOVED means the tracked lines were moved or copied here from another file
+	// in the same commit. The engine continues walking in that source file, with
+	// NewRange's FilePath and line numbers updated to point there.
 	MOVED
 )
 

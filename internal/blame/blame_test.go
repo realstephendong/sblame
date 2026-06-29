@@ -3,6 +3,7 @@ package blame
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -71,6 +72,46 @@ func (f *fakeHistory) RenameSource(child, parent *object.Commit, newPath string)
 	}
 	oldPath, score, found := gitlayer.BestRenameMatch(newLines, candidates, gitlayer.RenameThreshold)
 	return oldPath, score, found, nil
+}
+
+// CopySource mirrors gitlayer.CopySource over the in-memory trees, restricted
+// (like the real one) to the parent files this commit changed.
+func (f *fakeHistory) CopySource(child, parent *object.Commit, newPath string, block []string) (string, int, bool, error) {
+	if gitlayer.BlockSubstance(block) < gitlayer.MinCopyChars {
+		return "", 0, false, nil
+	}
+	childFiles := f.files[child.Hash]
+	parentFiles := f.files[parent.Hash]
+	var names []string
+	for path := range parentFiles {
+		if path == newPath {
+			continue
+		}
+		if cl, ok := childFiles[path]; ok && linesEqual(cl, parentFiles[path]) {
+			continue // unchanged in this commit
+		}
+		names = append(names, path)
+	}
+	sort.Strings(names)
+	for _, path := range names {
+		if start, ok := gitlayer.FindBlock(parentFiles[path], block); ok {
+			return path, start, true, nil
+		}
+	}
+	return "", 0, false, nil
+}
+
+// linesEqual reports whether two line slices are identical.
+func linesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // build constructs a fakeHistory from ordered (author, lines) versions over the
@@ -417,6 +458,73 @@ func TestRun_FollowsRenameChain(t *testing.T) {
 	}
 	if result.Author != "alice" {
 		t.Errorf("author: got %q, want %q (rename chain should be followed)", result.Author, "alice")
+	}
+}
+
+func TestRun_FollowsMovedBlockToSource(t *testing.T) {
+	// bob moves a function from src.go into the existing dst.go. Blaming a moved
+	// line attributes it to alice (who wrote it in src.go), not bob, at reduced
+	// confidence.
+	checksum := []string{
+		"func Checksum(data []byte) uint32 {",
+		"\tvar sum uint32",
+		"\tfor _, b := range data {",
+		"\t\tsum += uint32(b)",
+		"\t}",
+		"\treturn sum",
+		"}",
+	}
+	f, commits := buildFiles(t, []struct {
+		author string
+		files  fileMap
+	}{
+		{author: "alice", files: fileMap{
+			"src.go": append([]string{"package compute", ""}, checksum...),
+			"dst.go": {"package util", ""},
+		}},
+		{author: "bob", files: fileMap{
+			"src.go": {"package compute", ""}, // function removed
+			"dst.go": append([]string{"package util", ""}, checksum...),
+		}},
+	})
+
+	// dst.go line 3 is the moved function signature.
+	result, err := Run(f, commits[1], types.LineRange{FilePath: "dst.go", Start: 3, End: 3})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Author != "alice" {
+		t.Errorf("author: got %q, want %q (moved code should trace to its source)", result.Author, "alice")
+	}
+	if result.Confidence >= 1.0 {
+		t.Errorf("confidence: got %v, want < 1.0 for a move", result.Confidence)
+	}
+}
+
+func TestRun_ShortAddedLineIsNotAMove(t *testing.T) {
+	// An added line that happens to also appear in another changed file is NOT a
+	// move when it lacks substance — it stays authored at the adding commit, so
+	// trivial lines don't get misattributed.
+	f, commits := buildFiles(t, []struct {
+		author string
+		files  fileMap
+	}{
+		{author: "alice", files: fileMap{
+			"src.go": {"x := 1", "y := 2"},
+			"dst.go": {"a := 1"},
+		}},
+		{author: "bob", files: fileMap{
+			"src.go": {"x := 1"},           // "y := 2" removed
+			"dst.go": {"a := 1", "y := 2"}, // and added here
+		}},
+	})
+
+	result, err := Run(f, commits[1], types.LineRange{FilePath: "dst.go", Start: 2, End: 2})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Author != "bob" {
+		t.Errorf("author: got %q, want %q (trivial added line is not a move)", result.Author, "bob")
 	}
 }
 

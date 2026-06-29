@@ -2,6 +2,7 @@ package gitlayer
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,6 +317,96 @@ func TestRenameSource(t *testing.T) {
 		}
 		if ok {
 			t.Error("expected no rename source for a brand-new file")
+		}
+	})
+}
+
+// writeCommit writes each path's content into the worktree and commits them
+// together, so one commit can touch several files (e.g. a cross-file move).
+func writeCommit(t *testing.T, fs billy.Filesystem, wt *git.Worktree, files map[string]string, msg string) plumbing.Hash {
+	t.Helper()
+	for path, content := range files {
+		f, err := fs.Create(path)
+		if err != nil {
+			t.Fatalf("fs.Create(%s): %v", path, err)
+		}
+		if _, err := f.Write([]byte(content)); err != nil {
+			t.Fatalf("write(%s): %v", path, err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close(%s): %v", path, err)
+		}
+		if _, err := wt.Add(path); err != nil {
+			t.Fatalf("wt.Add(%s): %v", path, err)
+		}
+	}
+	h, err := wt.Commit(msg, &git.CommitOptions{Author: sig(), AllowEmptyCommits: true})
+	if err != nil {
+		t.Fatalf("wt.Commit(%s): %v", msg, err)
+	}
+	return h
+}
+
+func TestCopySource(t *testing.T) {
+	r, fs, wt := newInMemoryRepo(t)
+	checksum := []string{
+		"func Checksum(data []byte) uint32 {",
+		"    var sum uint32",
+		"    for _, b := range data {",
+		"        sum += uint32(b)",
+		"    }",
+		"    return sum",
+		"}",
+	}
+	file := func(lines ...string) string { return strings.Join(lines, "\n") + "\n" }
+	aLines := append([]string{"package a", ""}, checksum...)
+
+	// c1 seeds a.go with the function, plus b.go and an unchanging file.
+	c1 := writeCommit(t, fs, wt, map[string]string{
+		"a.go":         file(aLines...),
+		"b.go":         file("package b"),
+		"untouched.go": file("package u", "", "// filler line carrying well over forty characters of real content"),
+	}, "seed")
+	// c2 moves Checksum from a.go into b.go (both change); untouched.go stays.
+	c2 := writeCommit(t, fs, wt, map[string]string{
+		"a.go": file("package a"),
+		"b.go": file(append([]string{"package b", ""}, checksum...)...),
+	}, "move Checksum a.go -> b.go")
+
+	parent := mustResolve(t, r, c1)
+	child := mustResolve(t, r, c2)
+
+	t.Run("finds the block in the file the commit changed", func(t *testing.T) {
+		src, start, ok, err := r.CopySource(child, parent, "b.go", checksum)
+		if err != nil {
+			t.Fatalf("CopySource: %v", err)
+		}
+		if !ok || src != "a.go" {
+			t.Fatalf("got (%q, %d, %v), want a.go", src, start, ok)
+		}
+		if start != 3 { // a.go at parent: "package a", "", then the block
+			t.Errorf("start = %d, want 3", start)
+		}
+	})
+
+	t.Run("a sub-threshold block is not matched", func(t *testing.T) {
+		_, _, ok, err := r.CopySource(child, parent, "b.go", []string{"    return sum"})
+		if err != nil {
+			t.Fatalf("CopySource: %v", err)
+		}
+		if ok {
+			t.Error("expected no match for a block under the substance threshold")
+		}
+	})
+
+	t.Run("a block only in an unchanged file is not matched", func(t *testing.T) {
+		block := []string{"// filler line carrying well over forty characters of real content"}
+		_, _, ok, err := r.CopySource(child, parent, "b.go", block)
+		if err != nil {
+			t.Fatalf("CopySource: %v", err)
+		}
+		if ok {
+			t.Error("expected no match: the only source file was not changed in this commit")
 		}
 	})
 }

@@ -17,6 +17,7 @@ package eval
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,9 @@ type version struct {
 	// it on a renamed file's pre-rename versions so the walk has a rename to
 	// follow. It is the last field so existing positional literals stay valid.
 	path string
+	// extra holds additional files present at this commit, beyond path:lines, so
+	// one commit can touch more than one file (e.g. a move's source and target).
+	extra map[string][]string
 }
 
 // Case is one evaluation scenario: a linear history (oldest first), a line to
@@ -251,6 +255,49 @@ func builtinCases() []Case {
 			wantAuthor: "alice",
 			minConf:    0.8,
 		},
+		{
+			// Part 2: a function moved from one file to another in a single
+			// commit is traced to the author who wrote it in the source file,
+			// not the commit that relocated it, at reduced confidence.
+			name: "moved code is traced to the source file",
+			path: "dst.go",
+			history: []version{
+				{
+					author: "alice",
+					path:   "src.go",
+					lines: []string{
+						"package compute",
+						"",
+						"func Checksum(data []byte) uint32 {",
+						"\tvar sum uint32",
+						"\tfor _, b := range data {",
+						"\t\tsum += uint32(b)",
+						"\t}",
+						"\treturn sum",
+						"}",
+					},
+					extra: map[string][]string{"dst.go": {"package util", ""}},
+				},
+				{
+					author: "bob", // moves Checksum from src.go into dst.go
+					lines: []string{
+						"package util",
+						"",
+						"func Checksum(data []byte) uint32 {",
+						"\tvar sum uint32",
+						"\tfor _, b := range data {",
+						"\t\tsum += uint32(b)",
+						"\t}",
+						"\treturn sum",
+						"}",
+					},
+					extra: map[string][]string{"src.go": {"package compute", ""}},
+				},
+			},
+			queryLine:  3, // "func Checksum(...)" — moved from src.go
+			wantAuthor: "alice",
+			minConf:    0.8,
+		},
 	}
 }
 
@@ -301,6 +348,46 @@ func (h *linearHistory) RenameSource(child, parent *object.Commit, newPath strin
 	return oldPath, score, found, nil
 }
 
+// CopySource searches the parent files this commit changed (other than newPath)
+// for block, mirroring gitlayer.CopySource over the in-memory trees.
+func (h *linearHistory) CopySource(child, parent *object.Commit, newPath string, block []string) (string, int, bool, error) {
+	if gitlayer.BlockSubstance(block) < gitlayer.MinCopyChars {
+		return "", 0, false, nil
+	}
+	childFiles := h.files[child.Hash]
+	parentFiles := h.files[parent.Hash]
+	var names []string
+	for path := range parentFiles {
+		if path == newPath {
+			continue
+		}
+		if cl, ok := childFiles[path]; ok && linesEqual(cl, parentFiles[path]) {
+			continue // unchanged in this commit
+		}
+		names = append(names, path)
+	}
+	sort.Strings(names)
+	for _, path := range names {
+		if start, ok := gitlayer.FindBlock(parentFiles[path], block); ok {
+			return path, start, true, nil
+		}
+	}
+	return "", 0, false, nil
+}
+
+// linesEqual reports whether two line slices are identical.
+func linesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // buildHistory materializes a Case's versions into a linearHistory and returns
 // it with the head commit.
 func buildHistory(c Case) (*linearHistory, *object.Commit) {
@@ -312,12 +399,19 @@ func buildHistory(c Case) (*linearHistory, *object.Commit) {
 			Author: object.Signature{Name: v.author, When: time.Unix(int64(i+1)*1000, 0)},
 		}
 		h.order = append(h.order, commit)
+		fm := map[string][]string{}
 		if v.lines != nil {
 			path := v.path
 			if path == "" {
 				path = c.path
 			}
-			h.files[commit.Hash] = map[string][]string{path: v.lines}
+			fm[path] = v.lines
+		}
+		for p, lines := range v.extra {
+			fm[p] = lines
+		}
+		if len(fm) > 0 {
+			h.files[commit.Hash] = fm
 		}
 		head = commit
 	}

@@ -16,10 +16,12 @@
 // is similar enough) and, if one is found, continues the walk under the old path
 // — so a line's history survives a `git mv`. See gitlayer.RenameSource.
 //
-// Cross-file COPY detection (a line range moved from another file that still
-// exists — git's `-C`) and within-commit line moves are not yet implemented; such
-// a relocation still surfaces as an AUTHORED change at the commit that moved it.
-// The MOVED classification is reserved for that future work. (Future work.)
+// Cross-file moves are followed too: when the tracked lines were added at a
+// commit but a substantial block of them was moved or copied from another file
+// the same commit changed, the step is classified MOVED and the walk continues in
+// that source file — so authorship traces to where the code was really written.
+// See gitlayer.CopySource. (Detecting copies from files the commit did NOT touch,
+// git's `-C -C` / `-C -C -C`, is not yet implemented.)
 package blame
 
 import (
@@ -51,27 +53,37 @@ type History interface {
 	// as newly introduced at child. It is called only when newPath is absent in
 	// parent. *gitlayer.Repo satisfies it via its own similarity matching.
 	RenameSource(child, parent *object.Commit, newPath string) (oldPath string, score float64, ok bool, err error)
+
+	// CopySource reports whether block — a run of lines added to newPath at child
+	// — was moved or copied from another file the same commit changed. When it
+	// was, ok is true, srcPath is that file and srcStart is the 1-based line where
+	// the block begins in srcPath at parent. It is called only when the tracked
+	// range is a pure addition; *gitlayer.Repo satisfies it via its own block
+	// matching.
+	CopySource(child, parent *object.Commit, newPath string, block []string) (srcPath string, srcStart int, ok bool, err error)
 }
 
 // StepResult holds the outcome of classifying one commit-to-parent step. When
-// Classification is AUTHORED the walk stops; for UNCHANGED and COSMETIC, NewRange
-// is the tracked range remapped into the parent's coordinates.
+// Classification is AUTHORED the walk stops; for UNCHANGED, COSMETIC, and MOVED,
+// NewRange is the tracked range remapped into the parent's coordinates (a
+// different file, for MOVED).
 type StepResult struct {
 	// Classification is how the tracked range changed at this commit.
 	Classification types.Classification
 
 	// NewRange is the range to continue tracking in the parent. It is only
-	// meaningful for UNCHANGED and COSMETIC.
+	// meaningful for UNCHANGED, COSMETIC, and MOVED (where its FilePath is the
+	// source file the lines moved from).
 	NewRange types.LineRange
 
 	// Confidence is a per-step multiplier in (0, 1] expressing how certain the
 	// classification is. It is 1.0 for AUTHORED and for an UNCHANGED or
 	// whitespace-only COSMETIC step that did not cross a fuzzy rename. It drops
-	// below 1.0 for a comment-only COSMETIC skip (comment detection is heuristic)
-	// and for any step that continues across a similarity-matched file rename
-	// (the rename match is heuristic too — an exact rename costs nothing). Run
-	// multiplies these together so an attribution reached past fuzzier skips
-	// reports lower overall confidence.
+	// below 1.0 for a comment-only COSMETIC skip, for a step that continues across
+	// a similarity-matched file rename (an exact rename costs nothing), and for a
+	// MOVED step that follows a moved/copied block to another file — all heuristic
+	// decisions. Run multiplies these together so an attribution reached past
+	// fuzzier skips reports lower overall confidence.
 	Confidence float64
 }
 
@@ -94,6 +106,12 @@ const fileRenamePenalty = 0.2
 func confForFileRename(score float64) float64 {
 	return confExact - fileRenamePenalty*(1-score)
 }
+
+// copyPenalty is the confidence cost of following a move/copy of a line block
+// into the source file it came from. The block matched another file's content
+// exactly, but cross-file attribution is still a heuristic, so the step is not
+// fully certain.
+const copyPenalty = 0.1
 
 // Run performs the full blame walk: starting from start, it follows first-parent
 // history, remapping the tracked range at each step, until it reaches the commit
@@ -131,7 +149,7 @@ func Run(h History, start *object.Commit, lr types.LineRange) (*types.BlameResul
 		switch step.Classification {
 		case types.AUTHORED:
 			return attribute(commit, conf), nil
-		case types.UNCHANGED, types.COSMETIC:
+		case types.UNCHANGED, types.COSMETIC, types.MOVED:
 			conf *= step.Confidence
 			commit = parent
 			cur = step.NewRange
@@ -221,8 +239,37 @@ func ClassifyStep(h History, child, parent *object.Commit, lr types.LineRange) (
 		}
 	}
 
-	// Pure additions and genuine modifications are authored at the child.
-	if hasAdded || hasRealModification {
+	// A genuine modification is authored at the child outright.
+	if hasRealModification {
+		return &StepResult{Classification: types.AUTHORED, Confidence: confExact}, nil
+	}
+
+	// A pure addition is authored at the child — unless the added lines were
+	// moved or copied from another file this commit changed, in which case the
+	// walk continues in that source file (the lines were authored there). Only
+	// the common single-Added-hunk case is handled; a range straddling several
+	// hunks falls through to AUTHORED.
+	if hasAdded {
+		if len(overlap) == 1 && overlap[0].Kind == gitlayer.Added {
+			hk := overlap[0]
+			block := sliceLines(childLines, hk.ChildStart, hk.ChildLen)
+			src, srcStart, ok, cerr := h.CopySource(child, parent, lr.FilePath, block)
+			if cerr != nil {
+				return nil, cerr
+			}
+			if ok {
+				offset := lr.Start - hk.ChildStart
+				return &StepResult{
+					Classification: types.MOVED,
+					NewRange: types.LineRange{
+						FilePath: src,
+						Start:    srcStart + offset,
+						End:      srcStart + offset + (lr.End - lr.Start),
+					},
+					Confidence: confExact - copyPenalty,
+				}, nil
+			}
+		}
 		return &StepResult{Classification: types.AUTHORED, Confidence: confExact}, nil
 	}
 

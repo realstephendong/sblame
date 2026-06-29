@@ -70,12 +70,22 @@ confidence. Rename chains (`a.go` → `b.go` → `c.go`) and rename-plus-edit co
 are handled, and a genuinely new file is told apart from a rename. On files that
 crossed a rename, sblame agrees with `git blame -C -C -C`.
 
+### Follows moved code across files
+
+When a block of lines is added to a file but was really moved or copied from
+another file the **same commit** changed (a refactor that relocates a function,
+say), sblame continues the walk in that source file instead of crediting the
+commit that moved it — git's `-C`. To avoid false matches, the moved block must
+be substantial (≥ 40 non-whitespace characters, git's default), so trivial lines
+like `}` never trigger it. (Copies from files the commit didn't touch — git's
+`-C -C` / `-C -C -C` — aren't detected yet.)
+
 ### Reports honest confidence
 
 Confidence is derived, not guessed. Each step contributes a factor — `1.0` for an
 exact, textual decision; less for a heuristic skip (a comment edit, an identifier
-rename, a similarity-matched file rename) — and they multiply, so an answer
-reached past fuzzier steps reports lower overall certainty.
+rename, a similarity-matched file rename, a cross-file move) — and they multiply,
+so an answer reached past fuzzier steps reports lower overall certainty.
 
 ### Language coverage
 
@@ -92,15 +102,16 @@ library's `go/scanner`; the other structural languages use tree-sitter.
 
 Starting from a line in a commit, the engine walks first-parent history and, at
 each step, classifies how the tracked range changed versus the parent —
-UNCHANGED and COSMETIC continue the walk (remapping the line, and switching paths
-across a rename), AUTHORED stops and attributes. It bottoms out at the commit
-that introduced the logic, or at the root.
+UNCHANGED and COSMETIC continue the walk (remapping the line), MOVED continues it
+in another file (a rename or a cross-file move), and AUTHORED stops and
+attributes. It bottoms out at the commit that introduced the logic, or at the
+root.
 
 ```
 cmd/sblame/         CLI entry point
 internal/types/     Core domain types (LineRange, Classification, BlameResult)
 internal/blame/     Recursive line-range tracking engine + cosmetic classification
-internal/gitlayer/  go-git wrappers: history walk, line diff, blob access, rename detection
+internal/gitlayer/  go-git wrappers: history walk, line diff, blob access, rename + copy detection
 internal/eval/      Accuracy / regression harness
 ```
 
@@ -110,9 +121,10 @@ object store — resolving commits, listing a tree's files, reading a blob's byt
 
 ## Not yet
 
-- **Copy detection (`-C`)** — a line range that moved from another file that still
-  exists.
-- **Within-commit line moves**, and **merge-parent attribution** (merges follow
-  the first parent only today, matching default `git blame`).
+- **Broader copy detection** — copies from files the commit didn't change (`-C -C`)
+  or from any commit in history (`-C -C -C`), code extracted into a brand-new
+  file, and whitespace-tolerant block matching.
+- **Merge-parent attribution** — merges follow the first parent only today,
+  matching default `git blame`.
 - **A systematic agreement harness** against `git blame -C` on a large, messy
   repo — current evaluation is a curated in-memory suite plus spot checks.
